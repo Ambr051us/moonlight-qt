@@ -1,0 +1,108 @@
+diff --git a/src/ControlStream.c b/src/ControlStream.c
+index 2b5182e..3f39251 100644
+--- a/src/ControlStream.c
++++ b/src/ControlStream.c
+@@ -396,14 +396,14 @@ static void queueFrameInvalidationTuple(uint32_t startFrame, uint32_t endFrame)
+                 .invalidate = true,
+             };
+             if (LbqOfferQueueItem(&referenceFrameControlQueue, qfit, &qfit->entry) == LBQ_BOUND_EXCEEDED) {
+-                // Too many invalidation tuples, so we need an IDR frame now
+-                Limelog("RFI range list reached maximum size limit\n");
++                // An earlier RFI is already queued. Dropping this tuple preserves rate-only
++                // congestion recovery instead of adding a large IDR burst to the queue.
++                Limelog("RFI range list reached maximum size; dropping newest range\n");
+                 free(qfit);
+-                LiRequestIdrFrame();
+             }
+         }
+         else {
+-            LiRequestIdrFrame();
++            Limelog("Unable to allocate RFI range; continuing without an IDR request\n");
+         }
+     }
+     else {
+diff --git a/src/VideoDepacketizer.c b/src/VideoDepacketizer.c
+index 43f2df9..860b15d 100644
+--- a/src/VideoDepacketizer.c
++++ b/src/VideoDepacketizer.c
+@@ -115,16 +115,18 @@ static void dropFrameState(void) {
+     // Count the number of consecutive frames dropped
+     consecutiveFrameDrops++;
+ 
+-    // If we reach our limit, immediately request an IDR frame and reset
++    // A post-startup RFI stream can recover without an IDR. Preserve the
++    // IDR escalation only while startup or an explicit decoder refresh is waiting.
+     if (consecutiveFrameDrops == CONSECUTIVE_DROP_LIMIT) {
+-        Limelog("Reached consecutive drop limit\n");
+-
+-        // Restart the count
+         consecutiveFrameDrops = 0;
+ 
+-        // Request an IDR frame
+-        waitingForIdrFrame = true;
+-        LiRequestIdrFrame();
++        if (waitingForIdrFrame) {
++            Limelog("Reached consecutive drop limit while waiting for IDR\n");
++            LiRequestIdrFrame();
++        }
++        else {
++            Limelog("Reached consecutive drop limit; continuing RFI-only recovery\n");
++        }
+     }
+ 
+     cleanupFrameState();
+@@ -1073,25 +1075,15 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
+         decodingFrame = false;
+         nextFrameNumber = frameIndex + 1;
+ 
+-        // If we can't submit this frame due to a discontinuity in the bitstream,
+-        // inform the host (if needed) and drop the data.
+-        if (waitingForIdrFrame || waitingForRefInvalFrame) {
+-            // IDR wait takes priority over RFI wait (and an IDR frame will satisfy both)
+-            if (waitingForIdrFrame) {
+-                Limelog("Waiting for IDR frame\n");
+-
+-                // We wait for the first fully received frame after a loss to approximate
+-                // detection of the recovery of the network. Requesting an IDR frame while
+-                // the network is unstable will just contribute to congestion collapse.
+-                if (waitingForNextSuccessfulFrame) {
+-                    LiRequestIdrFrame();
+-                }
+-            }
+-            else {
+-                // If we need an RFI frame first, then drop this frame
+-                // and update the reference frame invalidation window.
+-                Limelog("Waiting for RFI frame\n");
+-                connectionDetectedFrameLoss(startFrameNumber, frameIndex);
++        // Startup and explicit decoder refresh still require an IDR.
++        if (waitingForIdrFrame) {
++            Limelog("Waiting for IDR frame\n");
++
++            // We wait for the first fully received frame after a loss to approximate
++            // detection of the recovery of the network. Requesting an IDR frame while
++            // the network is unstable will just contribute to congestion collapse.
++            if (waitingForNextSuccessfulFrame) {
++                LiRequestIdrFrame();
+             }
+ 
+             waitingForNextSuccessfulFrame = false;
+@@ -1099,6 +1091,19 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
+             return;
+         }
+ 
++        // With continuous rolling intra refresh, a complete frame is still useful even
++        // while some references are damaged. Keep presentation live and use RFI only
++        // as congestion feedback; later refresh columns will heal visible corruption.
++        if (waitingForRefInvalFrame) {
++            if (waitingForNextSuccessfulFrame) {
++                connectionDetectedFrameLoss(startFrameNumber, frameIndex);
++            }
++
++            Limelog("Submitting complete frame %u while rolling recovery is active\n", frameIndex);
++            waitingForRefInvalFrame = false;
++            waitingForNextSuccessfulFrame = false;
++        }
++
+         LC_ASSERT(!waitingForNextSuccessfulFrame);
+ 
+         // Carry out any pending state drops. We can't just do this

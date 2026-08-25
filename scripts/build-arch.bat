@@ -39,6 +39,12 @@ if /I "%BUILD_CONFIG%"=="debug" (
     )
 )
 
+rem Apply the experiment patch to the pinned moonlight-common-c submodule.
+call "%~dp0apply-common-patches.bat"
+if !ERRORLEVEL! NEQ 0 (
+    exit /b 1
+)
+
 rem Locate qmake and determine if we're using qmake.exe or (host-)qmake.bat
 rem (host-)qmake.bat is an ARM64 forwarder to the x64 version of qmake.exe
 where /q qmake.bat
