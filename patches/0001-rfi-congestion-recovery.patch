@@ -28,7 +28,7 @@ index 43f2df9..860b15d 100644
 @@ -115,16 +115,18 @@ static void dropFrameState(void) {
      // Count the number of consecutive frames dropped
      consecutiveFrameDrops++;
- 
+
 -    // If we reach our limit, immediately request an IDR frame and reset
 +    // A post-startup RFI stream can recover without an IDR. Preserve the
 +    // IDR escalation only while startup or an explicit decoder refresh is waiting.
@@ -37,7 +37,7 @@ index 43f2df9..860b15d 100644
 -
 -        // Restart the count
          consecutiveFrameDrops = 0;
- 
+
 -        // Request an IDR frame
 -        waitingForIdrFrame = true;
 -        LiRequestIdrFrame();
@@ -49,12 +49,12 @@ index 43f2df9..860b15d 100644
 +            Limelog("Reached consecutive drop limit; continuing RFI-only recovery\n");
 +        }
      }
- 
+
      cleanupFrameState();
 @@ -1073,25 +1075,15 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
          decodingFrame = false;
          nextFrameNumber = frameIndex + 1;
- 
+
 -        // If we can't submit this frame due to a discontinuity in the bitstream,
 -        // inform the host (if needed) and drop the data.
 -        if (waitingForIdrFrame || waitingForRefInvalFrame) {
@@ -84,12 +84,12 @@ index 43f2df9..860b15d 100644
 +            if (waitingForNextSuccessfulFrame) {
 +                LiRequestIdrFrame();
              }
- 
+
              waitingForNextSuccessfulFrame = false;
 @@ -1099,6 +1091,19 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
              return;
          }
- 
+
 +        // With continuous rolling intra refresh, a complete frame is still useful even
 +        // while some references are damaged. Keep presentation live and use RFI only
 +        // as congestion feedback; later refresh columns will heal visible corruption.
@@ -104,5 +104,5 @@ index 43f2df9..860b15d 100644
 +        }
 +
          LC_ASSERT(!waitingForNextSuccessfulFrame);
- 
+
          // Carry out any pending state drops. We can't just do this
